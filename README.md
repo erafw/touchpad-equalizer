@@ -33,7 +33,8 @@ Most budget laptops ship with touchpads that feel rough — shaky cursor, imprec
 
 ## 📸 Screenshot
 
-> *(add a screenshot of the UI here)*
+<img width="438" height="609" alt="Captura de tela 2026-10-11 132754" src="https://github.com/user-attachments/assets/3396bac4-2c04-4838-a654-f42883f5c03c" />
+
 
 ---
 
