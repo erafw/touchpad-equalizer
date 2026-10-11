@@ -83,5 +83,3 @@ Settings are saved automatically to `~/.touchpad_eq_v3.json`.
 | `Ctrl + Alt + T` | Toggle equalizer on/off |
 
 ---
-
-## 🏗️ How it works
