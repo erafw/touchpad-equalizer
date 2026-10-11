@@ -1,7 +1,6 @@
 """
-TouchPad Equalizer for Windows — v3 (fix feedback loop)
-Estratégia: não suprime o evento original.
-Aplica apenas a DIFERENÇA entre o movimento bruto e o filtrado.
+TouchPad Equalizer for Windows — v3.1.0
+by erafw
 """
 
 import threading
@@ -12,18 +11,14 @@ import math
 import json
 import os
 import sys
+import tkinter as tk
+from tkinter import ttk
 from dataclasses import dataclass, asdict
 from typing import Optional
 
 import keyboard
 import pystray
 from PIL import Image, ImageDraw
-
-try:
-    import customtkinter as ctk
-    CTK_AVAILABLE = True
-except ImportError:
-    CTK_AVAILABLE = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Win32
@@ -80,7 +75,6 @@ user32.CallNextHookEx.argtypes = [ctypes.wintypes.HHOOK, ctypes.c_int,
                                    ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
 
 def send_correction(dx: int, dy: int):
-    """Injeta apenas a correção (diferença entre filtrado e bruto)."""
     if dx == 0 and dy == 0:
         return
     inp = INPUT(
@@ -101,9 +95,9 @@ CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".touchpad_eq_v3.json")
 
 @dataclass
 class Config:
-    smoothing:       float = 0.45   # 0=máximo suave, 1=sem filtro
-    jitter_radius:   float = 1.5    # px — zona morta anti-tremor
-    sensitivity:     float = 1.0    # multiplicador base
+    smoothing:       float = 0.45
+    jitter_radius:   float = 1.5
+    sensitivity:     float = 1.0
     accel_exponent:  float = 1.4
     accel_threshold: float = 8.0
     accel_max_boost: float = 3.0
@@ -130,8 +124,6 @@ class Config:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class EMAFilter:
-    """Suaviza o movimento. Retorna quanto MOVER A MAIS ou A MENOS."""
-
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.sx = self.sy = 0.0
@@ -141,22 +133,16 @@ class EMAFilter:
 
     def process(self, dx: float, dy: float):
         speed = math.hypot(dx, dy)
-
-        # Zona de jitter — suprime micro-tremores
         if speed < self.cfg.jitter_radius:
             self.sx *= 0.2
             self.sy *= 0.2
-            # Retorna o negativo do bruto para cancelar o movimento original
             return -dx, -dy
 
-        # Alpha adaptativo: movimento rápido = menos suavização
         norm  = min(speed / 25.0, 1.0)
         alpha = self.cfg.smoothing + norm * (1.0 - self.cfg.smoothing)
-
         self.sx = alpha * dx + (1 - alpha) * self.sx
         self.sy = alpha * dy + (1 - alpha) * self.sy
 
-        # Ballistics
         out_speed = math.hypot(self.sx, self.sy)
         scaled    = out_speed * self.cfg.sensitivity
         if scaled > self.cfg.accel_threshold:
@@ -165,11 +151,9 @@ class EMAFilter:
             boost  = min(boost, self.cfg.accel_max_boost)
             scaled *= boost
 
-        ratio = (scaled / out_speed) if out_speed > 1e-6 else 1.0
+        ratio      = (scaled / out_speed) if out_speed > 1e-6 else 1.0
         filtered_x = self.sx * ratio
         filtered_y = self.sy * ratio
-
-        # Retorna apenas a DIFERENÇA (correção) em relação ao bruto
         return filtered_x - dx, filtered_y - dy
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -196,14 +180,12 @@ class TouchpadEqualizer:
                     ctypes.POINTER(MSLLHOOKSTRUCT)
                 ).contents
 
-                # Ignora eventos injetados pelo próprio app
                 if ms.flags & INJECTED_FLAG:
                     return user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
 
                 if self.cfg.enabled and self._last_x is not None:
                     dx = float(ms.pt.x - self._last_x)
                     dy = float(ms.pt.y - self._last_y)
-
                     if dx != 0 or dy != 0:
                         with self._lock:
                             corr_x, corr_y = self.ema.process(dx, dy)
@@ -213,17 +195,14 @@ class TouchpadEqualizer:
                             iy = int(self._accum_y)
                             self._accum_x -= ix
                             self._accum_y -= iy
-
-                        # Injeta só a correção — o movimento bruto já foi aplicado
                         send_correction(ix, iy)
 
                 self._last_x = ms.pt.x
                 self._last_y = ms.pt.y
 
         except Exception as e:
-            print(f"[EQ] erro (passando adiante): {e}")
+            print(f"[EQ] erro: {e}")
 
-        # SEMPRE passa o evento original adiante — sem suprimir
         return user32.CallNextHookEx(self._hook_id, nCode, wParam, lParam)
 
     def _run_hook(self):
@@ -265,8 +244,22 @@ class TouchpadEqualizer:
             self._last_x = self._last_y = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Painel
+# Painel — tkinter com visual escuro estilo Apple
 # ═══════════════════════════════════════════════════════════════════════════════
+
+BG       = "#1c1c1e"
+BG_CARD  = "#2c2c2e"
+BG_BTN   = "#3a3a3c"
+BLUE     = "#0A84FF"
+GREEN    = "#34C759"
+RED      = "#FF453A"
+FG       = "#ffffff"
+FG_DIM   = "#888888"
+FONT     = ("Helvetica", 13)
+FONT_SM  = ("Helvetica", 10)
+FONT_HDR = ("Helvetica", 18, "bold")
+FONT_SEC = ("Helvetica", 11, "bold")
+RADIUS   = 10
 
 class ConfigPanel:
     def __init__(self, cfg: Config, eq: TouchpadEqualizer):
@@ -278,76 +271,128 @@ class ConfigPanel:
         if self.win:
             try:
                 if self.win.winfo_exists():
+                    self.win.deiconify()
                     self.win.lift()
+                    self.win.focus_force()
                     return
             except Exception:
                 pass
 
-        import tkinter as tk
         self.win = tk.Tk()
-        self.win.title("🎛️ TouchPad Equalizer v3 — by erafw")
-        self.win.geometry("480x420")
+        self.win.title("TouchPad EQ  v3.1.0  —  by erafw")
+        self.win.geometry("440x580")
         self.win.resizable(False, False)
+        self.win.configure(bg=BG)
         self.win.attributes('-topmost', True)
-        self.win.after(200, lambda: self.win.attributes('-topmost', False))
-        self.win.after(100, lambda: self.win.state('normal'))
-        self.win.after(150, lambda: self.win.lift())
-        self.win.after(200, lambda: self.win.focus_force())
+        self.win.after(300, lambda: self.win.attributes('-topmost', False))
 
-        cfg = self.cfg
-
-        def section(text):
-            f = tk.LabelFrame(self.win, text=text,
-                              font=("Segoe UI", 10, "bold"), padx=8, pady=6)
-            f.pack(fill="x", padx=12, pady=6)
-            return f
-
-        def row(parent, label, var, lo, hi):
-            r = tk.Frame(parent)
-            r.pack(fill="x", pady=2)
-            tk.Label(r, text=label, width=22, anchor="w").pack(side="left")
-            lv = tk.Label(r, text=f"{var.get():.2f}", width=6)
-            lv.pack(side="right")
-            def upd(v):
-                lv.config(text=f"{float(v):.2f}")
-                self._apply()
-            tk.Scale(r, from_=lo, to=hi, resolution=0.01, orient="horizontal",
-                     variable=var, command=upd, showvalue=False
-                     ).pack(side="left", fill="x", expand=True)
-
-        self.v_enabled  = tk.BooleanVar(value=cfg.enabled)
-        self.v_smooth   = tk.DoubleVar(value=cfg.smoothing)
-        self.v_jitter   = tk.DoubleVar(value=cfg.jitter_radius)
-        self.v_sens     = tk.DoubleVar(value=cfg.sensitivity)
-        self.v_exp      = tk.DoubleVar(value=cfg.accel_exponent)
-        self.v_boost    = tk.DoubleVar(value=cfg.accel_max_boost)
-
-        f0 = section("⚡ Status")
-        tk.Checkbutton(f0, text="Equalizador ativo",
-                       variable=self.v_enabled,
-                       command=self._apply).pack(anchor="w")
-
-        f1 = section("〰️ Suavização")
-        row(f1, "Suavização (0=max, 1=off)", self.v_smooth, 0.05, 1.0)
-        row(f1, "Raio anti-jitter (px)",     self.v_jitter, 0.2,  4.0)
-
-        f2 = section("🚀 Velocidade")
-        row(f2, "Sensibilidade",    self.v_sens,  0.3, 3.0)
-        row(f2, "Curva de accel.", self.v_exp,   1.0, 3.0)
-        row(f2, "Boost máximo",    self.v_boost, 1.0, 5.0)
-
-        bf = tk.Frame(self.win)
-        bf.pack(fill="x", padx=12, pady=10)
-        tk.Button(bf, text="💾 Salvar",  command=self._save,  width=14).pack(side="left",  padx=4)
-        tk.Button(bf, text="↺ Resetar", command=self._reset, width=14).pack(side="right", padx=4)
-
-        tk.Label(self.win, text=f"Toggle: {cfg.toggle_hotkey}",
-                 fg="gray", font=("Segoe UI", 8)).pack()
-
+        self._build_ui()
         self.win.protocol("WM_DELETE_WINDOW", self.win.withdraw)
-        self.win.after(100, lambda: self.win.lift())
-        self.win.after(100, lambda: self.win.focus_force())
         self.win.mainloop()
+
+    def _card(self, parent):
+        f = tk.Frame(parent, bg=BG_CARD, bd=0)
+        f.pack(fill="x", padx=20, pady=6)
+        return f
+
+    def _build_ui(self):
+        cfg = self.cfg
+        win = self.win
+
+        # ── Header ────────────────────────────────────────────────────────────
+        hdr = tk.Frame(win, bg=BG)
+        hdr.pack(fill="x", padx=24, pady=(24, 2))
+
+        tk.Label(hdr, text="🎛️  TouchPad Equalizer",
+                 font=FONT_HDR, bg=BG, fg=FG).pack(side="left")
+
+        self.v_enabled = tk.BooleanVar(value=cfg.enabled)
+        tk.Checkbutton(
+            hdr, text="Ativo", variable=self.v_enabled,
+            command=self._apply,
+            bg=BG, fg=GREEN, selectcolor=BG,
+            activebackground=BG, activeforeground=GREEN,
+            font=FONT, cursor="hand2",
+        ).pack(side="right", padx=4)
+
+        tk.Label(win, text="by erafw", font=FONT_SM,
+                 bg=BG, fg=FG_DIM).pack(anchor="w", padx=28, pady=(0, 8))
+
+        tk.Frame(win, bg="#3a3a3c", height=1).pack(fill="x", padx=20, pady=4)
+
+        # ── Helper slider ─────────────────────────────────────────────────────
+        def section(icon, title):
+            outer = tk.Frame(win, bg=BG_CARD, bd=0)
+            outer.pack(fill="x", padx=20, pady=6)
+            tk.Label(outer, text=f"  {icon}  {title}",
+                     font=FONT_SEC, bg=BG_CARD, fg=FG_DIM
+                     ).pack(anchor="w", padx=8, pady=(10, 2))
+            return outer
+
+        def slider_row(parent, label, var, lo, hi):
+            row = tk.Frame(parent, bg=BG_CARD)
+            row.pack(fill="x", padx=12, pady=(2, 8))
+
+            top = tk.Frame(row, bg=BG_CARD)
+            top.pack(fill="x")
+            tk.Label(top, text=label, font=FONT,
+                     bg=BG_CARD, fg=FG).pack(side="left")
+            val_lbl = tk.Label(top, text=f"{var.get():.2f}",
+                               font=FONT, bg=BG_CARD, fg=FG_DIM)
+            val_lbl.pack(side="right")
+
+            def upd(v):
+                val_lbl.config(text=f"{float(v):.2f}")
+                self._apply()
+
+            tk.Scale(
+                row, from_=lo, to=hi, resolution=0.01,
+                orient="horizontal", variable=var, command=upd,
+                showvalue=False, bg=BG_CARD, fg=FG,
+                troughcolor="#3a3a3c", activebackground=BLUE,
+                highlightthickness=0, bd=0, sliderrelief="flat",
+                sliderlength=20,
+            ).pack(fill="x", pady=(2, 0))
+
+        # ── Variáveis ─────────────────────────────────────────────────────────
+        self.v_smooth = tk.DoubleVar(value=cfg.smoothing)
+        self.v_jitter = tk.DoubleVar(value=cfg.jitter_radius)
+        self.v_sens   = tk.DoubleVar(value=cfg.sensitivity)
+        self.v_exp    = tk.DoubleVar(value=cfg.accel_exponent)
+        self.v_boost  = tk.DoubleVar(value=cfg.accel_max_boost)
+
+        # ── Seções ────────────────────────────────────────────────────────────
+        f1 = section("〰️", "Suavização")
+        slider_row(f1, "Intensidade",      self.v_smooth, 0.05, 1.0)
+        slider_row(f1, "Raio anti-jitter", self.v_jitter, 0.2,  4.0)
+
+        f2 = section("🚀", "Velocidade")
+        slider_row(f2, "Sensibilidade",   self.v_sens,  0.3, 3.0)
+        slider_row(f2, "Curva de accel.", self.v_exp,   1.0, 3.0)
+        slider_row(f2, "Boost máximo",    self.v_boost, 1.0, 5.0)
+
+        # ── Botões ────────────────────────────────────────────────────────────
+        bf = tk.Frame(win, bg=BG)
+        bf.pack(fill="x", padx=20, pady=(10, 4))
+
+        tk.Button(
+            bf, text="💾  Salvar", command=self._save,
+            bg=BLUE, fg=FG, font=FONT,
+            relief="flat", cursor="hand2",
+            activebackground="#0060CC", activeforeground=FG,
+            padx=12, pady=8,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 6))
+
+        tk.Button(
+            bf, text="↺  Resetar", command=self._reset,
+            bg=BG_BTN, fg=RED, font=FONT,
+            relief="flat", cursor="hand2",
+            activebackground="#4a3a3c", activeforeground=RED,
+            padx=12, pady=8,
+        ).pack(side="left", expand=True, fill="x", padx=(6, 0))
+
+        tk.Label(win, text=f"toggle: {cfg.toggle_hotkey}",
+                 font=FONT_SM, bg=BG, fg="#3a3a3a").pack(pady=(8, 16))
 
     def _apply(self):
         self.cfg.smoothing       = self.v_smooth.get()
@@ -376,7 +421,7 @@ class ConfigPanel:
 def make_icon():
     img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse([4, 4, 60, 60], fill="#1565C0")
+    draw.ellipse([4, 4, 60, 60], fill="#0A84FF")
     draw.text((16, 20), "EQ", fill="white")
     return img
 
@@ -402,7 +447,7 @@ def run_tray(cfg: Config, eq: TouchpadEqualizer, panel: ConfigPanel):
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Sair", on_quit),
     )
-    pystray.Icon("TouchpadEQ", make_icon(), "TouchPad EQ v3 — by erafw", menu).run()
+    pystray.Icon("TouchpadEQ", make_icon(), "TouchPad EQ v3.1.0 — by erafw", menu).run()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main
